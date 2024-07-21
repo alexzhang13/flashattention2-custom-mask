@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 
-from utils import is_hip
+from utils import is_hip, keep, configs
 
 @triton.jit
 def _attn_fwd_inner(
@@ -22,23 +22,28 @@ def _attn_fwd_inner(
     offs_n: tl.constexpr,  #
     N_CTX: tl.constexpr,
     fp8_v: tl.constexpr,
+    USE_MASK: tl.constexpr,
 ):
     """
 
     """
     # range of values handled by this stage
-    if STAGE == 1:
-        lo, hi = 0, start_m * BLOCK_M
-    elif STAGE == 2:
-        lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
-        lo = tl.multiple_of(lo, BLOCK_M)
+    # if STAGE == 1:
+    #     lo, hi = 0, start_m * BLOCK_M
+    # elif STAGE == 2:
+    #     lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
+    #     lo = tl.multiple_of(lo, BLOCK_M)
     # causal = False
-    else:
-        lo, hi = 0, N_CTX
+    # else:
+        # lo, hi = 0, N_CTX
+    lo, hi = 0, N_CTX
+
     K_block_ptr = tl.advance(K_block_ptr, (0, lo))
     V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
-    # TODO: advance mask pointer?
-    mask_block_ptr = tl.advance(mask_block_ptr, (lo, 0))
+    
+    if USE_MASK:
+        # TODO: advance mask pointer along N dim
+        mask_block_ptr = tl.advance(mask_block_ptr, (0, lo))
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -46,11 +51,11 @@ def _attn_fwd_inner(
         # -- compute qk ----
         k = tl.load(K_block_ptr)
         qk = tl.dot(q, k)
-        if STAGE == 2:
+        if USE_MASK:
             # mask = offs_m[:, None] >= (start_n + offs_n[None, :])
             # TODO: replace mask!
-            mask = tl.load(mask_block_ptr)
-            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+            mask_ = tl.load(mask_block_ptr)
+            qk = qk * qk_scale + tl.where(mask_, 0, -1.0e6)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -76,29 +81,12 @@ def _attn_fwd_inner(
         # TODO: is this wrong? no, just stride
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+
         # TODO: update mask pointer offset
-        mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_N))
+        if USE_MASK:
+            mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_N))
+            
     return acc, l_i, m_i
-
-
-# We don't run auto-tuning every time to keep the tutorial fast. Keeping
-# the code below and commenting out the equivalent parameters is convenient for
-# re-tuning.
-configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64, 128]\
-    for BN in [32, 64]\
-    for s in ([1] if is_hip() else [3, 4, 7])\
-    for w in [4, 8]\
-]
-
-
-def keep(conf):
-    BLOCK_M = conf.kwargs["BLOCK_M"]
-    BLOCK_N = conf.kwargs["BLOCK_N"]
-    if BLOCK_M * BLOCK_N < 128 * 128 and conf.num_warps == 8:
-        return False
-    return True
 
 
 @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
@@ -108,12 +96,13 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
               stride_kz, stride_kh, stride_kn, stride_kk,  #
               stride_vz, stride_vh, stride_vk, stride_vn,  #
               stride_oz, stride_oh, stride_om, stride_on,  #
-              stride_mask_z, stride_mask_m, stride_mask_n,  #
+              stride_mask_z, stride_mask_h, stride_mask_m, stride_mask_n,  #
               Z, H, N_CTX,  #
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
-              STAGE: tl.constexpr  #
+              STAGE: tl.constexpr,  #
+              USE_MASK: tl.constexpr,
               ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -121,6 +110,9 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
     off_z = off_hz // H
     off_h = off_hz % H
     qvk_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
+    
+    if USE_MASK:
+        mask_offset = off_z.to(tl.int64) * stride_mask_z + off_h.to(tl.int64) * stride_mask_h
     # TODO: define mask offset
 
     # block pointers
@@ -159,7 +151,7 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
     )
     
     # TODO: Make a mask block pointer and compute offsets
-    mask_block_ptr = tl.make_block_ptr(
+    mask_block_ptr = None if not USE_MASK else tl.make_block_ptr(
         base=mask + mask_offset,
         shape=(N_CTX, N_CTX),
         strides=(stride_mask_m, stride_mask_n), # TODO
@@ -183,22 +175,21 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
     # stage 1: off-band
     # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
     # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
-    if STAGE & 1:
+    if USE_MASK:
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
                                         mask_block_ptr,
                                         start_m, qk_scale,  #
                                         BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                        4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
+                                        4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5,  #
+                                        USE_MASK
                                         )
-    # stage 2: on-band
-    if STAGE & 2:
-        # barrier makes it easier for compielr to schedule the
-        # two loops independently
+    else:
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
-                                        mask_block_ptr,
+                                        None,
                                         start_m, qk_scale,  #
                                         BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                        2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
+                                        2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5,  #
+                                        USE_MASK
                                         )
     # epilogue
     m_i += tl.math.log2(l_i)

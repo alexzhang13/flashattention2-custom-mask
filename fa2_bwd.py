@@ -22,11 +22,12 @@ def _attn_bwd_preprocess(O, DO,  #
 # The main inner-loop logic for computing dK and dV.
 @triton.jit
 def _attn_bwd_dkdv(dk, dv,  #
-                   Q, k, v, sm_scale,  #
+                   Q, k, v, mask, sm_scale,  #
                    DO,  #
                    M, D,  #
                    # shared by Q/K/V/DO.
                    stride_tok, stride_d,  #
+                    mask_stride_tok, mask_stride_tokk,
                    H, N_CTX, BLOCK_M1: tl.constexpr,  #
                    BLOCK_N1: tl.constexpr,  #
                    HEAD_DIM: tl.constexpr,  #
@@ -38,6 +39,11 @@ def _attn_bwd_dkdv(dk, dv,  #
     offs_k = tl.arange(0, HEAD_DIM)
     qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
     do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
+
+    # TODO: verify correctness
+    if MASK:
+        maskT_ptrs = mask + offs_m[None, :] * mask_stride_tok + offs_n[:, None] * mask_stride_tokk
+
     # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
     curr_m = start_m
@@ -51,8 +57,9 @@ def _attn_bwd_dkdv(dk, dv,  #
         pT = tl.math.exp2(qkT - m[None, :])
         # Autoregressive masking.
         if MASK:
-            mask = (offs_m[None, :] >= offs_n[:, None])
-            pT = tl.where(mask, pT, 0.0)
+            maskT = tl.load(maskT_ptrs)
+            # mask = (offs_m[None, :] >= offs_n[:, None])
+            pT = tl.where(maskT, pT, 0.0)
         do = tl.load(do_ptrs)
         # Compute dV.
         ppT = pT
@@ -69,14 +76,17 @@ def _attn_bwd_dkdv(dk, dv,  #
         curr_m += step_m
         qT_ptrs += step_m * stride_tok
         do_ptrs += step_m * stride_tok
+        if MASK:
+            maskT_ptrs += step_m * mask_stride_tok
     return dk, dv
 
 
 # the main inner-loop logic for computing dQ
 @triton.jit
 def _attn_bwd_dq(dq, q, K, V,  #
-                 do, m, D,
+                 do, m, D, mask,
                  # shared by Q/K/V/DO.
+                 mask_stride_tok, mask_stride_tokk,  #
                  stride_tok, stride_d,  #
                  H, N_CTX,  #
                  BLOCK_M2: tl.constexpr,  #
@@ -90,6 +100,10 @@ def _attn_bwd_dq(dq, q, K, V,  #
     offs_k = tl.arange(0, HEAD_DIM)
     kT_ptrs = K + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
     vT_ptrs = V + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
+    
+    if MASK:
+        mask_ptrs = mask + offs_m[:, None] * mask_stride_tok + offs_n[None, :] * mask_stride_tokk
+
     # D (= delta) is pre-divided by ds_scale.
     Di = tl.load(D + offs_m)
     # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
@@ -103,9 +117,10 @@ def _attn_bwd_dq(dq, q, K, V,  #
         p = tl.math.exp2(qk - m)
         # Autoregressive masking.
         if MASK:
-            offs_n = curr_n + tl.arange(0, BLOCK_N2)
-            mask = (offs_m[:, None] >= offs_n[None, :])
-            p = tl.where(mask, p, 0.0)
+            # offs_n = curr_n + tl.arange(0, BLOCK_N2)
+            mask_ = tl.load(mask_ptrs)
+            # mask_ = (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(mask_, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
         ds = p * (dp - Di[:, None])
@@ -117,28 +132,38 @@ def _attn_bwd_dq(dq, q, K, V,  #
         curr_n += step_n
         kT_ptrs += step_n * stride_tok
         vT_ptrs += step_n * stride_tok
+        if MASK:
+            mask_ptrs += step_n * mask_stride_tokk
     return dq
 
 
 @triton.jit
-def _attn_bwd(Q, K, V, sm_scale,  #
+def _attn_bwd(Q, K, V, mask, sm_scale,  #
               DO,  #
               DQ, DK, DV,  #
               M, D,
               # shared by Q/K/V/DO.
               stride_z, stride_h, stride_tok, stride_d,  #
+              mask_stride_z, mask_stride_h, mask_stride_tok, mask_stride_tokk,  #
               H, N_CTX,  #
               BLOCK_M1: tl.constexpr,  #
               BLOCK_N1: tl.constexpr,  #
               BLOCK_M2: tl.constexpr,  #
               BLOCK_N2: tl.constexpr,  #
               BLK_SLICE_FACTOR: tl.constexpr,  #
-              HEAD_DIM: tl.constexpr):
+              HEAD_DIM: tl.constexpr,
+              USE_MASK: tl.constexpr):
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
     bhid = tl.program_id(2)
     off_chz = (bhid * N_CTX).to(tl.int64)
     adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
+    
+    if USE_MASK: 
+        m_adj = (mask_stride_h * (bhid % H) + mask_stride_z * (bhid // H)).to(tl.int64)
+        mask += m_adj
+        
+    # TODO: verify this is the same as adj
     pid = tl.program_id(0)
 
     # offset pointers for batch/head
@@ -169,16 +194,18 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     v = tl.load(V + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
 
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
+    # num_steps = N_CTX // BLOCK_M1
 
     dk, dv = _attn_bwd_dkdv(dk, dv,  #
-                            Q, k, v, sm_scale,  #
+                            Q, k, v, mask, sm_scale,  #
                             DO,  #
                             M, D,  #
                             stride_tok, stride_d,  #
+                            mask_stride_tok, mask_stride_tokk,
                             H, N_CTX,  #
                             MASK_BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
                             start_n, start_m, num_steps,  #
-                            MASK=True  #
+                            MASK=USE_MASK  #
                             )
 
     start_m += num_steps * MASK_BLOCK_M1
@@ -187,10 +214,11 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     # Compute dK and dV for non-masked blocks.
     dk, dv = _attn_bwd_dkdv(  #
         dk, dv,  #
-        Q, k, v, sm_scale,  #
+        Q, k, v, mask, sm_scale,  #
         DO,  #
         M, D,  #
         stride_tok, stride_d,  #
+        mask_stride_tok, mask_stride_tokk,
         H, N_CTX,  #
         BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
         start_n, start_m, num_steps,  #
@@ -207,6 +235,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
 
     # THIS BLOCK DOES DQ:
     start_m = pid * BLOCK_M2
+    start_n = 0
     end_n = start_m + BLOCK_M2
 
     MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
@@ -224,25 +253,31 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     # but inside each call to _attn_bwd_dq, from left to right), but that's
     # not due to anything important.  I just wanted to reuse the loop
     # structure for dK & dV above as much as possible.
+
     num_steps = BLOCK_M2 // MASK_BLOCK_N2
+    # num_steps = N_CTX // BLOCK_N2
     dq = _attn_bwd_dq(dq, q, K, V,  #
-                      do, m, D,  #
+                      do, m, D, mask,  #
+                      mask_stride_tok, mask_stride_tokk,  #
                       stride_tok, stride_d,  #
                       H, N_CTX,  #
                       BLOCK_M2, MASK_BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,  #
-                      MASK=True  #
+                      # BLOCK_M2, BLOCK_N2, HEAD_DIM, #
+                      # start_m, start_n, num_steps,  #
+                      MASK=USE_MASK  #
                       )
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
     num_steps = end_n // BLOCK_N2
     dq = _attn_bwd_dq(dq, q, K, V,  #
-                      do, m, D,  #
+                      do, m, D, mask,  #
+                      mask_stride_tok, mask_stride_tokk,  #
                       stride_tok, stride_d,  #
                       H, N_CTX,  #
                       BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * BLOCK_N2, num_steps,  #
-                      MASK=False  #
+                      MASK=USE_MASK  #
                       )
     # Write back dQ.
     dq_ptrs = DQ + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
