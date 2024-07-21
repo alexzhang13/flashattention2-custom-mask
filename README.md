@@ -37,8 +37,8 @@ B, H, L, D = 4, 16, 4096, 64
 fp32_q = torch.randn(B, H, L, D).float().cuda()
 fp32_k = torch.randn(B, H, L, D).float().cuda()
 fp32_v = torch.randn(B, H, L, D).float().cuda()
-mask = torch.randint(0, 2, (B, 1, L, D)).int().cuda()
-mask = torch.broadcast_to(mask, (B, H, L, D))
+mask = torch.randint(0, 2, (B, 1, L, L)).int().cuda()
+mask = torch.broadcast_to(mask, (B, H, L, L))
 
 out = flash_attention_custom_mask(fp32_q, fp32_k, fp32_v, mask=mask)
 ...
