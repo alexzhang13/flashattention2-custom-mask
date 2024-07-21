@@ -69,6 +69,7 @@ We compare directly to the [xformers memory efficient attention](https://faceboo
 1. This implementation only works on Ampere devices and up. I originally tried running it on a V100 (Volta) and it failed. 
 2. You need to be on `triton>=3.0.0`, or it'll complain about permutation indices on the value vector pointer. The `torch` and `flash-attn` libraries may force you to install `triton=2.x.x`, but you can just re-install `triton>=3.0.0` and it should work. I may fix this manually in the future.
     * This is oddly specific, but I'm not able to have `flash-attn` and `xformers` at the same time. I had to run them separately and generate the plots.
+3. TODO: Add benchmarking for peak memory consumption and other efficiency metrics.
 
 If time permits, I'm interested in making this implementation generalizable / changing the CUDA implementation for FA3 (if it's necessary of course). I also probably will run some more realistic workloads and see what happens.
 
