@@ -20,7 +20,10 @@ def test_op(Z, H, N_CTX, causal, HEAD_DIM, dtype=torch.float16):
     M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     if causal:
-        print('causal!')
+        # Uncomment this to test random masks. Should work.
+        # print("test random mask matches!")
+        # M = mask = torch.randint(0, 2, (N_CTX, N_CTX), dtype=torch.uint8, device="cuda", requires_grad=False) #torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"), diagonal=1)
+        # mask = torch.broadcast_to(mask, (Z, H, N_CTX, N_CTX))
         p[:, :, M == 0] = float("-inf")
     p = torch.softmax(p.float(), dim=-1).half()
     # p = torch.exp(p)
