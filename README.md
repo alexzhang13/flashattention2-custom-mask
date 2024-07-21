@@ -5,6 +5,8 @@ to define a (batch of) custom mask. It modifies both the forward and backwards p
  
 Original Triton code: [https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html)
 
+See the original thread: [https://github.com/Dao-AILab/flash-attention/issues/352](https://github.com/Dao-AILab/flash-attention/issues/352)
+
 ## Example Setup
 The relevant libraries needed to use the custom-mask FlashAttention2 kernel are below:
 ```
