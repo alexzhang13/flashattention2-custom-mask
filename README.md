@@ -1,4 +1,4 @@
-## FlashAttention2 with Custom Masks
+# FlashAttention2 with Custom Masks 🎭
 For efficiency purposes, the standard implementations of FlashAttention currently do not support **arbitrary custom masks**. 
 Their implementation of specific masks like causal masking for language modeling are implemented using branch logic to save memory. This repository is just a modified version of the tutorial Triton implementation of FlashAttention2 that allows the user
 to define a (batch of) custom mask. It modifies both the forward and backwards pass to handle custom masking (you can define a different mask per head and batch).
