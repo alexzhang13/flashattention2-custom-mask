@@ -1,9 +1,9 @@
 import torch
 import triton
 
-from fa2_fwd import _attn_fwd
-from fa2_bwd import _attn_bwd_preprocess, _attn_bwd
-from utils import is_hip
+from fa2_custom_mask.fa2_fwd import _attn_fwd
+from fa2_custom_mask.fa2_bwd import _attn_bwd_preprocess, _attn_bwd
+from fa2_custom_mask.utils import is_hip
 
 class _attention(torch.autograd.Function):
 
@@ -115,5 +115,5 @@ class _attention(torch.autograd.Function):
             )
 
         return dq, dk, dv, None, None
-
+    
 flash_attention_custom_mask = _attention.apply

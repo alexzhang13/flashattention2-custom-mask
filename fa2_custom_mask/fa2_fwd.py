@@ -1,7 +1,18 @@
 import triton
 import triton.language as tl
 
-from utils import is_hip, keep, configs
+from fa2_custom_mask.utils import is_hip, keep
+
+# We don't run auto-tuning every time to keep the tutorial fast. Keeping
+# the code below and commenting out the equivalent parameters is convenient for
+# re-tuning.
+configs = [
+    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+    for BM in [64, 128]\
+    for BN in [32, 64]\
+    for s in ([1] if is_hip() else [3, 4, 7])\
+    for w in [4, 8]\
+]
 
 @triton.jit
 def _attn_fwd_inner(
@@ -113,7 +124,6 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
     
     if USE_MASK:
         mask_offset = off_z.to(tl.int64) * stride_mask_z + off_h.to(tl.int64) * stride_mask_h
-    # TODO: define mask offset
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
