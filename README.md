@@ -12,6 +12,7 @@ pip install triton>=3.0.0
 pip install torch
 ```
 
+#### For Viewing Benchmarking Results
 Other libraries for evaluating the performance of the models is below. These are primarily for `test_benchmark.py`, which verifies the correctness of the implementation.
 ```
 pip install pytest
@@ -22,7 +23,6 @@ To compare with the official FlashAttention and `xformers.ops.memory_efficient_a
 ```
 pip install flash-attn --no-build-isolation
 pip3 install -U xformers --index-url https://download.pytorch.org/whl/cu121
-
 ```
 
 ## Testing Correctness
@@ -49,11 +49,15 @@ out.backward(loss)
 Simple benchmark against the base Triton implementation. In our custom mask version, we pass in the canonical causal mask as input (hence storing in global device memory). Running `test_benchmark.py`,
 with batch size=4, # heads=16, hidden dim=64, and sequence length `N_CTX` ranging from 256 to 16384 in powers of 2.
 
-#### Causal Masks and No Masks Comparisons
+#### Causal Masks and No Masks Comparisons 
+We compare against the original experiments and original implementation, as well as the official FlashAttention and xformers implementation (note: there seems to be a versioning issue, so it's using a different implementation. I corrected the version in the later benchmarking experiments). 
+![causal and no masking with flash attn](./data/results-causal-fa.png)
+ 
+#### Causal Masks and No Masks Comparisons (with Correct xfrormers version)
 We compare against the original experiments and original implementation, as well as the xformers implementation. Notably, the original implementation does well for causal masking because of some pipelining tricks and ability to not have to store masks.
 ![causal and no masking](./data/results-causal.png)
 #### Custom Masking Comparison
-We compare directly to the (xformers memory efficient attention)[https://facebookresearch.github.io/xformers/components/ops.html] which allows for custom masking. We generate random masks (fixed across the head dimension).
+We compare directly to the [xformers memory efficient attention](https://facebookresearch.github.io/xformers/components/ops.html) which allows for custom masking. We generate random masks (fixed across the head dimension).
 ![custom masking](./data/results-random.png)
 
 
