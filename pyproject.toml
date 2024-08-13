@@ -1,0 +1,16 @@
+[project]
+name = "flashattention2-custom-mask"
+version = "0.1.0"
+description = 'Unofficial FlashAttention2 with Custom Masks'
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "Alex Zhang", email = "alzhang@alumni.princeton.edu" }]
+keywords = ["flash attention", "triton", "pytorch"]
+dynamic=["dependencies"]
+
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+where = ["."]  # list of folders that contain the packages (["."] by default)
