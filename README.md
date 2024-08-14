@@ -9,6 +9,12 @@ Original Triton code: [https://triton-lang.org/main/getting-started/tutorials/06
 
 See the original thread: [https://github.com/Dao-AILab/flash-attention/issues/352](https://github.com/Dao-AILab/flash-attention/issues/352)
 
+## Quick Install
+Create a Python environment (>=3.8) and install through pip:
+```
+pip install flashattention2-custom-mask
+```
+
 ## Example Setup
 The relevant libraries needed to use the custom-mask FlashAttention2 kernel are below:
 ```
