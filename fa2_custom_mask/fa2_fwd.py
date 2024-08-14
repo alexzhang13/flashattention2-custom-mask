@@ -32,9 +32,8 @@ def _attn_fwd_inner(
     offs_m: tl.constexpr,
     offs_n: tl.constexpr,  #
     N_CTX: tl.constexpr,
+    fp8_v: tl.constexpr,
     USE_MASK: tl.constexpr,
-    mask_insert_num: tl.constexpr,
-    eps: tl.constexpr,
 ):
     """
 
@@ -67,7 +66,7 @@ def _attn_fwd_inner(
             # mask = offs_m[:, None] >= (start_n + offs_n[None, :])
             # TODO: replace mask!
             mask_ = tl.load(mask_block_ptr)
-            qk = qk * qk_scale + tl.where(mask_ < eps, mask_insert_num, 0)
+            qk = qk * qk_scale + tl.where(mask_, 0, -1.0e6)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -82,7 +81,10 @@ def _attn_fwd_inner(
         acc = acc * alpha[:, None]
         # update acc
         v = tl.load(V_block_ptr)
-        p = p.to(V.dtype.element_ty)
+        if fp8_v:
+            p = p.to(tl.float8e5)
+        else:
+            p = p.to(tl.float16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
@@ -112,8 +114,6 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
               BLOCK_N: tl.constexpr,  #
               STAGE: tl.constexpr,  #
               USE_MASK: tl.constexpr,
-              mask_insert_num: tl.constexpr,
-              eps: tl.constexpr,
               ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -190,16 +190,16 @@ def _attn_fwd(Q, K, V, mask, sm_scale, M, Out,  #
                                         mask_block_ptr,
                                         start_m, qk_scale,  #
                                         BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                        4 - STAGE, offs_m, offs_n, N_CTX,  #
-                                        USE_MASK, mask_insert_num, eps
+                                        4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5,  #
+                                        USE_MASK
                                         )
     else:
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
                                         None,
                                         start_m, qk_scale,  #
                                         BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                        2, offs_m, offs_n, N_CTX,  #
-                                        USE_MASK, mask_insert_num, eps
+                                        2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5,  #
+                                        USE_MASK
                                         )
     # epilogue
     m_i += tl.math.log2(l_i)

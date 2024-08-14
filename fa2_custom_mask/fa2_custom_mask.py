@@ -8,7 +8,7 @@ from fa2_custom_mask.utils import is_hip
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, mask=None, sm_scale=None, mask_insert_num=None, eps=None):
+    def forward(ctx, q, k, v, mask=None, sm_scale=1.3):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
         USE_MASK = mask is not None
@@ -25,15 +25,6 @@ class _attention(torch.autograd.Function):
         if is_hip():
             waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
             extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
-
-        if sm_scale is None:
-            sm_scale = 1 / (HEAD_DIM_K ** 0.5)
-
-        if mask_insert_num is None:
-            mask_insert_num = torch.finfo(v.dtype).min
-
-        if eps is None:
-            eps = torch.finfo(v.dtype).eps
 
         grid = lambda args: (triton.cdiv(q.shape[2], args["BLOCK_M"]), q.shape[0] * q.shape[1], 1)
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
@@ -55,8 +46,6 @@ class _attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM_K,  #
             STAGE=stage,  
             USE_MASK=USE_MASK, #
-            mask_insert_num=mask_insert_num,
-            eps=eps,
             **extra_kern_args)
 
         ctx.save_for_backward(q, k, v, o, mask, M)
@@ -67,7 +56,7 @@ class _attention(torch.autograd.Function):
         return o
 
     @staticmethod
-    def backward(ctx, do, eps=None):
+    def backward(ctx, do):
         q, k, v, o, mask, M = ctx.saved_tensors
         assert do.is_contiguous()
         assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
@@ -93,9 +82,6 @@ class _attention(torch.autograd.Function):
             BLOCK_M=PRE_BLOCK, HEAD_DIM=ctx.HEAD_DIM  #
         )
         grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
-
-        if eps is None:
-            eps = torch.finfo(v.dtype).eps
         
         if ctx.USE_MASK:
             _attn_bwd[grid](
@@ -111,7 +97,6 @@ class _attention(torch.autograd.Function):
                 USE_MASK=ctx.USE_MASK, #
                 num_warps=NUM_WARPS,  #
                 num_stages=NUM_STAGES,  #
-                eps=eps,
             )
         else:
             _attn_bwd[grid](
@@ -126,8 +111,7 @@ class _attention(torch.autograd.Function):
                 HEAD_DIM=ctx.HEAD_DIM,
                 USE_MASK=ctx.USE_MASK,#
                 num_warps=NUM_WARPS,  #
-                num_stages=NUM_STAGES,  #
-                eps=eps,
+                num_stages=NUM_STAGES  #
             )
 
         return dq, dk, dv, None, None

@@ -27,14 +27,13 @@ def _attn_bwd_dkdv(dk, dv,  #
                    M, D,  #
                    # shared by Q/K/V/DO.
                    stride_tok, stride_d,  #
-                   mask_stride_tok, mask_stride_tokk,
+                    mask_stride_tok, mask_stride_tokk,
                    H, N_CTX, BLOCK_M1: tl.constexpr,  #
                    BLOCK_N1: tl.constexpr,  #
                    HEAD_DIM: tl.constexpr,  #
                    # Filled in by the wrapper.
                    start_n, start_m, num_steps,  #
-                   MASK: tl.constexpr,
-                   eps: tl.constexpr, ):
+                   MASK: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -60,18 +59,18 @@ def _attn_bwd_dkdv(dk, dv,  #
         if MASK:
             maskT = tl.load(maskT_ptrs)
             # mask = (offs_m[None, :] >= offs_n[:, None])
-            pT = tl.where(maskT < eps, 0.0, pT)
+            pT = tl.where(maskT, pT, 0.0)
         do = tl.load(do_ptrs)
         # Compute dV.
         ppT = pT
-        ppT = ppT.to(do.dtype)
+        ppT = ppT.to(tl.float16)
         dv += tl.dot(ppT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m)
         # Compute dP and dS.
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
         dsT = pT * (dpT - Di[None, :])
-        dsT = dsT.to(qT.dtype)
+        dsT = dsT.to(tl.float16)
         dk += tl.dot(dsT, tl.trans(qT))
         # Increment pointers.
         curr_m += step_m
@@ -95,14 +94,13 @@ def _attn_bwd_dq(dq, q, K, V,  #
                  HEAD_DIM: tl.constexpr,
                  # Filled in by the wrapper.
                  start_m, start_n, num_steps,  #
-                 MASK: tl.constexpr,
-                 eps: tl.constexpr, ):
+                 MASK: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     offs_k = tl.arange(0, HEAD_DIM)
     kT_ptrs = K + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
     vT_ptrs = V + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
-
+    
     if MASK:
         mask_ptrs = mask + offs_m[:, None] * mask_stride_tok + offs_n[None, :] * mask_stride_tokk
 
@@ -122,11 +120,11 @@ def _attn_bwd_dq(dq, q, K, V,  #
             # offs_n = curr_n + tl.arange(0, BLOCK_N2)
             mask_ = tl.load(mask_ptrs)
             # mask_ = (offs_m[:, None] >= offs_n[None, :])
-            p = tl.where(mask_ < eps, 0.0, p)
+            p = tl.where(mask_, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
         ds = p * (dp - Di[:, None])
-        ds = ds.to(kT.dtype)
+        ds = ds.to(tl.float16)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
         dq += tl.dot(ds, tl.trans(kT))
@@ -154,18 +152,17 @@ def _attn_bwd(Q, K, V, mask, sm_scale,  #
               BLOCK_N2: tl.constexpr,  #
               BLK_SLICE_FACTOR: tl.constexpr,  #
               HEAD_DIM: tl.constexpr,
-              USE_MASK: tl.constexpr,
-              eps: tl.constexpr, ):
+              USE_MASK: tl.constexpr):
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
     bhid = tl.program_id(2)
     off_chz = (bhid * N_CTX).to(tl.int64)
     adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
-
-    if USE_MASK:
+    
+    if USE_MASK: 
         m_adj = (mask_stride_h * (bhid % H) + mask_stride_z * (bhid // H)).to(tl.int64)
         mask += m_adj
-
+        
     # TODO: verify this is the same as adj
     pid = tl.program_id(0)
 
@@ -208,8 +205,7 @@ def _attn_bwd(Q, K, V, mask, sm_scale,  #
                             H, N_CTX,  #
                             MASK_BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
                             start_n, start_m, num_steps,  #
-                            MASK=USE_MASK,  #
-                            eps=eps,
+                            MASK=USE_MASK  #
                             )
 
     start_m += num_steps * MASK_BLOCK_M1
@@ -226,8 +222,7 @@ def _attn_bwd(Q, K, V, mask, sm_scale,  #
         H, N_CTX,  #
         BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
         start_n, start_m, num_steps,  #
-        MASK=False,  #
-        eps=eps,
+        MASK=False  #
     )
 
     dv_ptrs = DV + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
@@ -270,8 +265,7 @@ def _attn_bwd(Q, K, V, mask, sm_scale,  #
                       start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,  #
                       # BLOCK_M2, BLOCK_N2, HEAD_DIM, #
                       # start_m, start_n, num_steps,  #
-                      MASK=USE_MASK,  #
-                      eps=eps
+                      MASK=USE_MASK  #
                       )
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
@@ -283,8 +277,7 @@ def _attn_bwd(Q, K, V, mask, sm_scale,  #
                       H, N_CTX,  #
                       BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * BLOCK_N2, num_steps,  #
-                      MASK=USE_MASK,  #
-                      eps=eps
+                      MASK=USE_MASK  #
                       )
     # Write back dQ.
     dq_ptrs = DQ + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
